@@ -1,0 +1,14 @@
+# Ignore all venv files
+.venv/
+# Ignore all vscode files
+.vscode/
+# Ignore pycache
+__pycache__/
+# Ignore .env file
+.env
+# Ignore .ppk files
+*.ppk
+# Ignore .pth files
+*.pth
+# Ignore data sub-folder
+climbing_classifier_data/
