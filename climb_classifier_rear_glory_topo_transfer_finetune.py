@@ -16,12 +16,7 @@ from datetime import datetime
 
 # %%
 # WandB Init
-wandb_logging_enabled = False
-if wandb_logging_enabled:
-    os.environ["WANDB_API_KEY"] = dotenv_values(".env")['WANDB_API_KEY']
-    os.environ["WANDB_NOTEBOOK_NAME"] = "climb_classifier_rear_glory_topo_transfer_finetune"
-    wandb.login()
-    wandb.init(project="climb_classifier_rear_glory_topo_transfer_finetune")
+wandb_logging_enabled = True
 
 # %%
 # Seed freeze
@@ -33,23 +28,28 @@ test_split = 0.1 # proportion of data is assigned to validation
 val_split = 0.1 # proportion of data assigned to testing
 img_size = (224, 224) # WxH of image to transform to
 complex_rand_image_transform_enabled = True # Whether to apply more complex random image transformations such as rand_flips
-batch_size = 16
+batch_size = 64
 
-starting_lr = 1e-7 # Should be 1e-7 if using lr_finder, else should start
-lr_finder_bool = False
+starting_lr = 1e-7 # Should be 1e-7 if using lr_finder
+lr_finder_bool = True
 
-epochs = 5
+epochs = 20
 
-wandb.init(config={
-    'test_split': test_split,
-    'val_split': val_split,
-    'img_size': img_size,
-    'complex_rand_image_transform_enabled': complex_rand_image_transform_enabled,
-    'batch_size':batch_size,
-    'starting_lr': starting_lr,
-    'lr_finder_bool': lr_finder_bool,
-    'epochs':5
-})
+# wandb init
+if wandb_logging_enabled:
+    os.environ["WANDB_API_KEY"] = dotenv_values(".env")['WANDB_API_KEY']
+    os.environ["WANDB_NOTEBOOK_NAME"] = "climb_classifier_rear_glory_custom_cnn"
+    wandb.login()
+    wandb.init(project="climb_classifier_rear_glory_topo_custom_cnn",
+               config={'test_split': test_split,
+                       'val_split': val_split,
+                       'img_size': img_size,
+                       'complex_rand_image_transform_enabled': complex_rand_image_transform_enabled,
+                       'batch_size':batch_size,
+                       'starting_lr': starting_lr,
+                       'lr_finder_bool': lr_finder_bool,
+                       'epochs':10
+                       })
 
 
 # %%
@@ -203,7 +203,7 @@ def train(dataloader, model, loss_fn, optimizer, epoch):
         optimizer.zero_grad()
         running_loss += loss.item()
         
-        if batch % batch_size == 0:
+        if batch % 3 == 0:
             loss, current = loss.item(), (batch + 1) * len(X)
             print(f"loss: {loss:>4f}  [{current:>5d}/{size:>5d}]")
     
@@ -247,7 +247,7 @@ def val(dataloader, model, loss_fn, epoch):
         best_accuracy = correct
         best_model_weights = model.state_dict()
         best_epoch = epoch+1
-        print(f'New Best Model: Epoch:{best_epoch} | Accuracy:{best_accuracy:>4f}\n')
+        print(f'New Best Model: Epoch:{best_epoch} | Accuracy:{best_accuracy*100:>4f}\n')
 
 # %%
 # Run Train/Val
@@ -287,4 +287,3 @@ def test(dataloader, model, loss_fn, model_weights):
     print(f"Test Error: \n Accuracy: {(100*correct):>0.1f}%, Avg loss: {test_loss:>4f} \n")
 
 test(test_dataloader, model, loss_fn, best_model_weights)
-# %%

@@ -12,3 +12,5 @@ __pycache__/
 *.pth
 # Ignore data sub-folder
 climbing_classifier_data/
+# Ignore wandb logs
+wandb/
