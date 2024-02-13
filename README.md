@@ -12,4 +12,4 @@ Photos of a higher quality are typically taken from a profile view with a partia
 
 The final type of typical photo is a topographic photo, which typically does not include a human subject, but focuses on the route itself. There can be drawn overlay to provide guidance of where the route goes. The topo may also be completely hand drawn. These photos are important sources of information, and having them grouped can make information collection more efficient for the user.
 
-![Topo Example](https://en.wikipedia.org/wiki/Topo_%28climbing%29#/media/File:Routen_Westliche_Zinne_Nord.jpg](https://climbapedia.org/sites/default/files/bixauca%20topo%203.jpg)https://climbapedia.org/sites/default/files/bixauca%20topo%203.jpg)
+![Topo Example](https://climbapedia.org/sites/default/files/bixauca%20topo%203.jpg)
