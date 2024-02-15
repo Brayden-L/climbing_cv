@@ -21,23 +21,32 @@ wandb_enabled = True
 wandb_grad_tracking = False
 save_best_model = False
 
+
 # %%
 # Seed freeze
 torch.manual_seed(1220)
 
 # %%
 # Parameters
-test_split = 0.1 # proportion of data is assigned to validation
-val_split = 0.1 # proportion of data assigned to testing
-img_size = (224, 224) # WxH of image to transform to
-complex_rand_image_transform_enabled = True # Whether to apply more complex random image transformations such as rand_flips
+param_config={'test_split': 0.1, # proportion of data is assigned to validation
+              'val_split': 0.1, # proportion of data assigned to testing
+              'img_size': (224, 224), # WxH of image to transform to
+              'complex_rand_image_transform_enabled': True, # Whether to apply more complex random image transformations such as rand_flips
+              'batch_size':64,
+              'starting_lr': 1e-7, # Should be 1e-7 if using lr_finder
+              'lr_finder_bool': False, # Wether
+              'epochs': 20
+        }
 
-batch_size = 64
-
-starting_lr = 1e-7 # Should be 1e-7 if using lr_finder
-lr_finder_bool = False
-
-epochs = 20
+# Store into vars for readability
+test_split = wandb.config['test_split']
+val_split = wandb.config['val_split'] 
+img_size = wandb.config['img_size']
+complex_rand_image_transform_enabled = wandb.config['complex_rand_image_transform_enabled']
+batch_size = wandb.config['batch_size']
+starting_lr = wandb.config['starting_lr']
+lr_finder_bool = wandb.config['lr_finder_bool']
+epochs = wandb.config['epochs']
 
 # wandb init
 if wandb_enabled:
@@ -49,15 +58,8 @@ os.environ["WANDB_API_KEY"] = dotenv_values(".env")['WANDB_API_KEY']
 wandb.login()
 wandb.init(project="climb_classifier_rear_glory_topo_custom_cnn",
             mode=wandb_enabled_str,
-            config={'test_split': test_split,
-                    'val_split': val_split,
-                    'img_size': img_size,
-                    'complex_rand_image_transform_enabled': complex_rand_image_transform_enabled,
-                    'batch_size':batch_size,
-                    'starting_lr': starting_lr,
-                    'lr_finder_bool': lr_finder_bool,
-                    'epochs': epochs
-                    })
+            config=param_config
+            )
 
 
 # %%
