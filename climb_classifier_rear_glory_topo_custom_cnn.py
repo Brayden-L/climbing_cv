@@ -13,10 +13,13 @@ import numpy as np
 from dotenv import dotenv_values
 import os
 from datetime import datetime
+from tqdm.notebook import tqdm
 
 # %%
 # WandB Init
-wandb_logging_enabled = True
+wandb_enabled = True
+wandb_grad_tracking = False
+save_best_model = False
 
 # %%
 # Seed freeze
@@ -28,28 +31,33 @@ test_split = 0.1 # proportion of data is assigned to validation
 val_split = 0.1 # proportion of data assigned to testing
 img_size = (224, 224) # WxH of image to transform to
 complex_rand_image_transform_enabled = True # Whether to apply more complex random image transformations such as rand_flips
+
 batch_size = 64
 
 starting_lr = 1e-7 # Should be 1e-7 if using lr_finder
-lr_finder_bool = True
+lr_finder_bool = False
 
 epochs = 20
 
 # wandb init
-if wandb_logging_enabled:
-    os.environ["WANDB_API_KEY"] = dotenv_values(".env")['WANDB_API_KEY']
-    os.environ["WANDB_NOTEBOOK_NAME"] = "climb_classifier_rear_glory_custom_cnn"
-    wandb.login()
-    wandb.init(project="climb_classifier_rear_glory_topo_custom_cnn",
-               config={'test_split': test_split,
-                       'val_split': val_split,
-                       'img_size': img_size,
-                       'complex_rand_image_transform_enabled': complex_rand_image_transform_enabled,
-                       'batch_size':batch_size,
-                       'starting_lr': starting_lr,
-                       'lr_finder_bool': lr_finder_bool,
-                       'epochs':10
-                       })
+if wandb_enabled:
+    wandb_enabled_str = 'online'
+else:
+    wandb_enabled_str = 'disabled'
+    
+os.environ["WANDB_API_KEY"] = dotenv_values(".env")['WANDB_API_KEY']
+wandb.login()
+wandb.init(project="climb_classifier_rear_glory_topo_custom_cnn",
+            mode=wandb_enabled_str,
+            config={'test_split': test_split,
+                    'val_split': val_split,
+                    'img_size': img_size,
+                    'complex_rand_image_transform_enabled': complex_rand_image_transform_enabled,
+                    'batch_size':batch_size,
+                    'starting_lr': starting_lr,
+                    'lr_finder_bool': lr_finder_bool,
+                    'epochs': epochs
+                    })
 
 
 # %%
@@ -139,7 +147,7 @@ class CNN(nn.Module):
             nn.Linear(in_features=n_channels, out_features=600),
             nn.Dropout(0.25),
             nn.Linear(in_features=600, out_features=120),
-            nn.Linear(in_features=120, out_features=num_classes)
+            nn.Linear(in_features=120, out_features=num_classes) # Softmax is applied by the crossentropyloss function, so is not needed here.
         )
         
     def forward(self, x):
@@ -211,8 +219,7 @@ def train(dataloader, model, loss_fn, optimizer, epoch):
     avg_loss = running_loss / len(dataloader)
 
     # Log average loss to wandb
-    if wandb_logging_enabled:
-        wandb.log({"Training Loss": avg_loss}, step=epoch)
+    wandb.log({"Training Loss": avg_loss}, step=epoch)
         
 
 # %%
@@ -239,8 +246,7 @@ def val(dataloader, model, loss_fn, epoch):
     correct /= size
     print(f"Val Error: \nAccuracy: {(100*correct):>0.1f}%, Avg loss: {val_loss:>4f} \n")
     
-    if wandb_logging_enabled:
-        wandb.log({"Test Loss": val_loss, "Val Accuracy": 100 * correct}, step=epoch)
+    wandb.log({"Val Loss": val_loss, "Val Accuracy": 100 * correct}, step=epoch)
         
     # Check if the current model is the best so far
     if correct > best_accuracy:
@@ -251,21 +257,21 @@ def val(dataloader, model, loss_fn, epoch):
 
 # %%
 # Run Train/Val
-for epoch in range(epochs):
+if wandb_grad_tracking:
+    wandb.watch(model, loss_fn, log='gradient', log_freq=25)
+for epoch in tqdm(range(epochs), desc="Epochs", unit="epoch"):
     print(f"Epoch {epoch+1}/{epochs}\n-------------------------------")
     train(train_dataloader, model, loss_fn, optimizer, epoch)
     val(val_dataloader, model, loss_fn, epoch)
-
-if wandb_logging_enabled:
-    wandb.finish()
 print("Done!")
 # %%
 # Save the best model
-timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-model_name = type(model).__name__
-filename = f"{model_name}_{timestamp}.pth"
-torch.save(best_model_weights, filename)
-print(f'Epoch {best_epoch} saved as {filename}')
+if save_best_model:
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    model_name = type(model).__name__
+    filename = f"{model_name}_{timestamp}.pth"
+    torch.save(best_model_weights, filename)
+    print(f'Epoch {best_epoch} saved as {filename}')
 # %%
 # Run on holdout test data
 def test(dataloader, model, loss_fn, model_weights):
@@ -285,5 +291,10 @@ def test(dataloader, model, loss_fn, model_weights):
     test_loss /= num_batches
     correct /= size
     print(f"Test Error: \n Accuracy: {(100*correct):>0.1f}%, Avg loss: {test_loss:>4f} \n")
+    return 100*correct, test_loss
 
-test(test_dataloader, model, loss_fn, best_model_weights)
+test_acc, test_loss = test(test_dataloader, model, loss_fn, best_model_weights)
+wandb.log({'test_acc': test_acc, 'test_loss': test_loss})
+
+# Finish wandb session
+wandb.finish()
