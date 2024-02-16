@@ -7,19 +7,24 @@ from torchvision import datasets
 import torchvision.transforms as transforms
 from torchvision.transforms import ToTensor
 from torch_lr_finder import LRFinder
+from torchvision.utils import save_image
 import wandb
+from sklearn.metrics import precision_recall_fscore_support
 
 import numpy as np
+import pandas as pd
 from dotenv import dotenv_values
 import os
 from datetime import datetime
 from tqdm.notebook import tqdm
+from collections import defaultdict
 
 # %%
-# WandB Init
+# Run utility bools
 wandb_enabled = True
 wandb_grad_tracking = False
 save_best_model = False
+save_incorrect_images_local = True
 
 
 # %%
@@ -32,21 +37,11 @@ param_config={'test_split': 0.1, # proportion of data is assigned to validation
               'val_split': 0.1, # proportion of data assigned to testing
               'img_size': (224, 224), # WxH of image to transform to
               'complex_rand_image_transform_enabled': True, # Whether to apply more complex random image transformations such as rand_flips
-              'batch_size':64,
+              'batch_size':32,
               'starting_lr': 1e-7, # Should be 1e-7 if using lr_finder
-              'lr_finder_bool': False, # Wether
-              'epochs': 20
+              'lr_finder_bool': True, # Wether
+              'epochs': 5
         }
-
-# Store into vars for readability
-test_split = wandb.config['test_split']
-val_split = wandb.config['val_split'] 
-img_size = wandb.config['img_size']
-complex_rand_image_transform_enabled = wandb.config['complex_rand_image_transform_enabled']
-batch_size = wandb.config['batch_size']
-starting_lr = wandb.config['starting_lr']
-lr_finder_bool = wandb.config['lr_finder_bool']
-epochs = wandb.config['epochs']
 
 # wandb init
 if wandb_enabled:
@@ -61,6 +56,15 @@ wandb.init(project="climb_classifier_rear_glory_topo_custom_cnn",
             config=param_config
             )
 
+# Store into vars for readability
+test_split = wandb.config['test_split']
+val_split = wandb.config['val_split'] 
+img_size = wandb.config['img_size']
+complex_rand_image_transform_enabled = wandb.config['complex_rand_image_transform_enabled']
+batch_size = wandb.config['batch_size']
+starting_lr = wandb.config['starting_lr']
+lr_finder_bool = wandb.config['lr_finder_bool']
+epochs = wandb.config['epochs']
 
 # %%
 # Training device selection
@@ -94,8 +98,9 @@ full_dataset = datasets.ImageFolder(root=data_path, transform=img_transform)
 # Class label counts
 class_labels = full_dataset.classes
 num_classes = len(class_labels)
-
+class_labels_dict = {i: class_labels[i] for i in range(num_classes)}
 class_indices = {label: [] for label in class_labels}
+
 for idx, (_, label_idx) in enumerate(full_dataset.imgs):
     class_name = class_labels[label_idx]
     class_indices[class_name].append(idx)
@@ -260,11 +265,13 @@ def val(dataloader, model, loss_fn, epoch):
 # %%
 # Run Train/Val
 if wandb_grad_tracking:
-    wandb.watch(model, loss_fn, log='gradient', log_freq=25)
+    wandb.watch(model, loss_fn, log='gradients', log_freq=25)
+    
 for epoch in tqdm(range(epochs), desc="Epochs", unit="epoch"):
     print(f"Epoch {epoch+1}/{epochs}\n-------------------------------")
     train(train_dataloader, model, loss_fn, optimizer, epoch)
     val(val_dataloader, model, loss_fn, epoch)
+    
 print("Done!")
 # %%
 # Save the best model
@@ -275,8 +282,68 @@ if save_best_model:
     torch.save(best_model_weights, filename)
     print(f'Epoch {best_epoch} saved as {filename}')
 # %%
+# Test Data
+# Utility funcs for test data output
+def calculate_metrics(predictions, targets, num_classes):
+    # Convert predictions and targets to numpy arrays
+    predictions_np = predictions.detach().cpu().numpy()
+    targets_np = targets.detach().cpu().numpy()
+
+    # Flatten the arrays to 1D
+    predictions_flat = predictions_np.argmax(axis=1).flatten()
+    targets_flat = targets_np.flatten()
+
+    # Calculate precision, recall, F1 score
+    precision, recall, f1, _ = precision_recall_fscore_support(targets_flat, predictions_flat, labels=range(num_classes), average=None)
+
+    # Create a DataFrame to store the results
+    metrics_df = pd.DataFrame({
+        'Class': class_labels,
+        'Precision': precision,
+        'Recall': recall,
+        'F1': f1
+    })
+
+    return metrics_df
+
+def save_incorrect_images(predictions, targets, images, class_labels_dict, base_dir='incorrect_image_archive'):
+    # Create the base directory if it doesn't exist
+    os.makedirs(base_dir, exist_ok=True)
+
+    # Get the current timestamp
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    
+    # Create the timestamped directory
+    save_dir = os.path.join(base_dir, timestamp)
+    os.makedirs(save_dir, exist_ok=True)
+
+    incorrect_indices = torch.where(predictions.argmax(1) != targets)[0]
+
+    for index in incorrect_indices:
+        predicted_class = predictions[index].argmax().item()
+        target_class = targets[index].item()
+
+        # Get class labels using the dictionary
+        predicted_class_label = class_labels_dict.get(predicted_class, f"Class {predicted_class}")
+        target_class_label = class_labels_dict.get(target_class, f"Class {target_class}")
+
+        # Create subfolders for true and predicted classes
+        true_class_folder = os.path.join(save_dir, target_class_label)
+        predicted_class_folder = os.path.join(true_class_folder, predicted_class_label)
+
+        # Create subfolders if they don't exist
+        os.makedirs(true_class_folder, exist_ok=True)
+        os.makedirs(predicted_class_folder, exist_ok=True)
+
+        # Save the image to the predicted class subfolder
+        image_filename = f"incorrect_instance_{index}.png"
+        image_path = os.path.join(predicted_class_folder, image_filename)
+
+        # Assuming images[index] is a PyTorch tensor
+        save_image(images[index], image_path)
+
 # Run on holdout test data
-def test(dataloader, model, loss_fn, model_weights):
+def test(dataloader, model, loss_fn, model_weights, save_incorrect_images_local):
     size = len(dataloader.dataset)
     num_batches = len(dataloader)
     
@@ -284,19 +351,47 @@ def test(dataloader, model, loss_fn, model_weights):
     model.load_state_dict(model_weights)
     model.eval()
     test_loss, correct = 0, 0
+    all_predictions, all_targets, all_images = [], [], []
+
     with torch.no_grad():
         for X, y in dataloader:
             X, y = X.to(device), y.to(device)
             pred = model(X)
+            all_predictions.append(pred)
+            all_targets.append(y)
+            all_images.append(X)
+
             test_loss += loss_fn(pred, y).item()
             correct += (pred.argmax(1) == y).type(torch.float).sum().item()
+
+    # Log incorrect instances with images
+    if save_incorrect_images_local:
+        all_predictions = torch.cat(all_predictions)
+        all_targets = torch.cat(all_targets)
+        all_images = torch.cat(all_images)
+
+        save_incorrect_images(all_predictions, all_targets, all_images, class_labels_dict)
+
+    # Calculate metrics
+    num_classes = len(torch.unique(all_targets))
+    metrics_df = calculate_metrics(all_predictions, all_targets, num_classes)
+
+    # Log metrics to W&B
+    wandb.log({"classification metrics": wandb.Table(dataframe=metrics_df)})
+
+    # Calculate accuracy and loss
     test_loss /= num_batches
     correct /= size
     print(f"Test Error: \n Accuracy: {(100*correct):>0.1f}%, Avg loss: {test_loss:>4f} \n")
-    return 100*correct, test_loss
 
-test_acc, test_loss = test(test_dataloader, model, loss_fn, best_model_weights)
-wandb.log({'test_acc': test_acc, 'test_loss': test_loss})
+    # Log accuracy and loss to W&B
+    wandb.log({'test_acc': 100*correct, 'test_loss': test_loss})
 
+    return None
+
+test(test_dataloader, model, loss_fn, best_model_weights, save_incorrect_images_local)
+
+# %%
 # Finish wandb session
 wandb.finish()
+# %%

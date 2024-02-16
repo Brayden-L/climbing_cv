@@ -14,3 +14,5 @@ __pycache__/
 climbing_classifier_data/
 # Ignore wandb logs
 wandb/
+# Ignore incorrect image archive
+incorrect_image_archive/
