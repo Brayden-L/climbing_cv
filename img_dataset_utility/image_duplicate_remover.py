@@ -1,12 +1,15 @@
+# Removes duplicates and shuffles images.
+
 # %%
 from PIL import Image
 import imagehash
 import os
 from collections import defaultdict
+import random
 
 # %%
-folder_path = r"C:\Users\Brayden\Desktop\climbing_photo_rear_glory_topo_classifier\climbing_classifier_data\topo"
-
+folder_path = r"C:\Users\Brayden\Desktop\climbing_photo_rear_glory_topo_classifier\climbing_classifier_data\rear"
+random.seed(1220)
 # %%
 def find_duplicate_images(folder_path):
     # Dictionary to store image hashes and their corresponding file paths
@@ -33,6 +36,10 @@ def find_duplicate_images(folder_path):
 
     # Filter out hashes with only one file (not duplicates)
     duplicate_hashes = {k: v for k, v in hash_dict.items() if len(v) > 1}
+
+    # Shuffle the order of potential duplicate images
+    for file_paths in duplicate_hashes.values():
+        random.shuffle(file_paths)
 
     # Rename potential duplicate images with sequential integers
     duplicate_count = 0

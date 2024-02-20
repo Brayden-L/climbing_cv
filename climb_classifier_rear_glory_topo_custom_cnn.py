@@ -2,10 +2,9 @@
 # Imports
 import torch
 from torch import nn
-from torch.utils.data import DataLoader, random_split, SubsetRandomSampler
+from torch.utils.data import DataLoader, random_split
 from torchvision import datasets
 import torchvision.transforms as transforms
-from torchvision.transforms import ToTensor
 from torch_lr_finder import LRFinder
 from torchvision.utils import save_image
 import wandb
@@ -17,7 +16,6 @@ from dotenv import dotenv_values
 import os
 from datetime import datetime
 from tqdm.notebook import tqdm
-from collections import defaultdict
 
 # %%
 # Run utility bools
