@@ -2,7 +2,7 @@
 # Imports
 import torch
 from torch import nn
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import DataLoader, random_split, WeightedRandomSampler, Dataset
 from torchvision import datasets
 import torchvision.transforms as transforms
 from torch_lr_finder import LRFinder
@@ -12,17 +12,21 @@ from sklearn.metrics import precision_recall_fscore_support
 
 import numpy as np
 import pandas as pd
+from sklearn.model_selection import train_test_split
+from sklearn.utils import compute_class_weight
+
 from dotenv import dotenv_values
 import os
 from datetime import datetime
 from tqdm.notebook import tqdm
+from PIL import Image
 
 # %%
 # Run utility bools
 wandb_enabled = True
 wandb_grad_tracking = False
 save_best_model = False
-save_incorrect_images_local = True
+save_incorrect_images_local = False
 
 
 # %%
@@ -33,12 +37,16 @@ torch.manual_seed(1220)
 # Parameters
 param_config={'test_split': 0.1, # proportion of data is assigned to validation
               'val_split': 0.1, # proportion of data assigned to testing
+              'class_imbalance_split_handling': True, # Enables balanced splitting of train/val/test datasets
+              'class_imbalance_sample_handling': False, # Enables a weighted random sampler when loading data into batches
+              'class_imbalance_loss_handling': True, # Enables weighted application of losses based on class.
               'img_size': (224, 224), # WxH of image to transform to
               'complex_rand_image_transform_enabled': True, # Whether to apply more complex random image transformations such as rand_flips
               'batch_size':32,
-              'starting_lr': 1e-7, # Should be 1e-7 if using lr_finder
-              'lr_finder_bool': True, # Wether
-              'epochs': 5
+              'starting_lr': 1e-4, # Should be 1e-7 if using lr_finder
+              'lr_finder_bool': False, # Whether to use the lr_finder tool
+              'weight_decay': 0,
+              'epochs': 10
         }
 
 # wandb init
@@ -56,13 +64,18 @@ wandb.init(project="climb_classifier_rear_glory_topo_custom_cnn",
 
 # Store into vars for readability
 test_split = wandb.config['test_split']
-val_split = wandb.config['val_split'] 
+val_split = wandb.config['val_split']
+class_imbalance_split_handling = wandb.config['class_imbalance_split_handling']
+class_imbalance_sample_handling = wandb.config['class_imbalance_sample_handling']
+class_imbalance_loss_handling = wandb.config['class_imbalance_loss_handling'] 
 img_size = wandb.config['img_size']
 complex_rand_image_transform_enabled = wandb.config['complex_rand_image_transform_enabled']
 batch_size = wandb.config['batch_size']
 starting_lr = wandb.config['starting_lr']
 lr_finder_bool = wandb.config['lr_finder_bool']
+weight_decay = wandb.config['weight_decay']
 epochs = wandb.config['epochs']
+
 
 # %%
 # Training device selection
@@ -93,7 +106,10 @@ else:
 data_path = './climbing_classifier_data'
 full_dataset = datasets.ImageFolder(root=data_path, transform=img_transform)
 
-# Class label counts
+# %%
+# Class labels, weights etc.
+
+# Class label details
 class_labels = full_dataset.classes
 num_classes = len(class_labels)
 class_labels_dict = {i: class_labels[i] for i in range(num_classes)}
@@ -108,19 +124,92 @@ class_label_counts = {label: len(indices) for label, indices in class_indices.it
 for label, count in class_label_counts.items():
     print(f"{label}: {count} samples\n")
 
-# Data splitting
-train_data, val_data, test_data = random_split(full_dataset, [1-(val_split+test_split), val_split, test_split])
+# Calculate class weights
+def calculate_class_weights(dataset):
+    labels = np.array([label_idx for _, label_idx in dataset.imgs])
+    class_weights = torch.Tensor(compute_class_weight('balanced', classes=np.unique(labels), y=labels)).to(device)
+    return class_weights
 
-# Data loader setup
-train_dataloader = DataLoader(train_data, batch_size=batch_size, shuffle=True)
-val_dataloader = DataLoader(val_data, batch_size=batch_size)
-test_dataloader = DataLoader(test_data, batch_size=batch_size)
+class_weights = calculate_class_weights(full_dataset)
+print(f"Class Weights: {class_weights}")
+
+# %%
+# Split the data into train, validation, and test sets
+if class_imbalance_split_handling:
+    # Ensure that train, val and test all have balanced classes using sklearn train_test_split function. A bit bulky as a result.
+    # Data splitting
+    train_data, temp_data, train_labels, temp_labels = train_test_split(
+        full_dataset.imgs, full_dataset.targets, 
+        test_size=val_split + test_split, 
+        random_state=42, 
+        stratify=full_dataset.targets
+    )
+
+    val_data, test_data, val_labels, test_labels = train_test_split(
+        temp_data, temp_labels, 
+        test_size=test_split / (val_split + test_split), 
+        random_state=42, 
+        stratify=temp_labels
+    )
+
+    # Create a WeightedRandomSampler
+    sampler = WeightedRandomSampler(weights=class_weights, num_samples=len(train_data), replacement=True) # this makes it more likely for an under-represented class to be sampled in a batch, the batch itself is not guaranteed to be balanced.
+
+    # There is no generic empty dataset class so we make our own.
+    class CustomImageDataset(Dataset):
+        def __init__(self, data, labels, transform=None):
+            self.data = data
+            self.labels = labels
+            self.transform = transform
+
+        def __len__(self):
+            return len(self.data)
+
+        def __getitem__(self, idx):
+            img_path, label = self.data[idx]
+            img = Image.open(img_path).convert("RGB")
+
+            if self.transform:
+                img = self.transform(img)
+
+            return img, label
+
+    # Dataset setup
+    train_dataset = CustomImageDataset(train_data, train_labels, transform=img_transform)
+    val_dataset = CustomImageDataset(val_data, val_labels, transform=img_transform)
+    test_dataset = CustomImageDataset(test_data, test_labels, transform=img_transform)
+    
+    # Dataloader setup
+    if class_imbalance_sample_handling:
+        train_dataloader = DataLoader(train_dataset, batch_size=batch_size, sampler=sampler)
+    else:
+        train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+        
+    val_dataloader = DataLoader(val_dataset, batch_size=batch_size)
+    test_dataloader = DataLoader(test_dataset, batch_size=batch_size)
+    
+else:
+    # If we want a basic split not accounting for class imbalance
+    # Data splitting
+    train_data, val_data, test_data = random_split(full_dataset, [1-(val_split+test_split), val_split, test_split])
+
+    # Create a WeightedRandomSampler
+    sampler = WeightedRandomSampler(weights=class_weights, num_samples=len(train_data), replacement=True)
+
+    # Data loader setup
+    if class_imbalance_sample_handling:
+        train_dataloader = DataLoader(train_data, batch_size=batch_size, sampler=sampler)
+    else:
+        train_dataloader = DataLoader(train_data, batch_size=batch_size, shuffle=True)
+    val_dataloader = DataLoader(val_data, batch_size=batch_size)
+    test_dataloader = DataLoader(test_data, batch_size=batch_size)
 
 # Data size confirmation
 for X, y in val_dataloader:
     print(f"Shape of X [N, C, H, W]: {X.shape}")
     print(f"Shape of y: {y.shape} {y.dtype}")
     break
+
 num_img_channels = X.shape[1]
 final_img_height = X.shape[2]
 final_img_width = X.shape[3]
@@ -165,9 +254,12 @@ print(model)
 
 # %%
 # Loss function and optimizer definition
-loss_fn = nn.CrossEntropyLoss()
+if class_imbalance_loss_handling:
+    loss_fn = nn.CrossEntropyLoss(weight=class_weights) # can weight loss function to bias
+else:
+    loss_fn = nn.CrossEntropyLoss()
 
-optimizer = torch.optim.Adam(model.parameters(), lr=starting_lr)
+optimizer = torch.optim.Adam(model.parameters(), lr=starting_lr, weight_decay=weight_decay)
 
 # [Optional]
 # LR Finder
@@ -194,7 +286,7 @@ if lr_finder_bool:
     lr_finder.reset() # to reset the model and optimizer to their initial state
 
     # Redefine optimizer with found LR
-    optimizer = torch.optim.Adam(model.parameters(), lr=optimized_lr)
+    optimizer = torch.optim.Adam(model.parameters(), lr=optimized_lr, weight_decay=weight_decay)
 
 # %%
 # Training loop definition
@@ -269,6 +361,7 @@ for epoch in tqdm(range(epochs), desc="Epochs", unit="epoch"):
     print(f"Epoch {epoch+1}/{epochs}\n-------------------------------")
     train(train_dataloader, model, loss_fn, optimizer, epoch)
     val(val_dataloader, model, loss_fn, epoch)
+    # scheduler.step()
     
 print("Done!")
 # %%
@@ -282,7 +375,7 @@ if save_best_model:
 # %%
 # Test Data
 # Utility funcs for test data output
-def calculate_metrics(predictions, targets, num_classes):
+def calculate_metrics(predictions, targets, num_classes, class_labels):
     # Convert predictions and targets to numpy arrays
     predictions_np = predictions.detach().cpu().numpy()
     targets_np = targets.detach().cpu().numpy()
@@ -362,17 +455,16 @@ def test(dataloader, model, loss_fn, model_weights, save_incorrect_images_local)
             test_loss += loss_fn(pred, y).item()
             correct += (pred.argmax(1) == y).type(torch.float).sum().item()
 
+    all_predictions = torch.cat(all_predictions)
+    all_targets = torch.cat(all_targets)
+    all_images = torch.cat(all_images)
+
     # Log incorrect instances with images
     if save_incorrect_images_local:
-        all_predictions = torch.cat(all_predictions)
-        all_targets = torch.cat(all_targets)
-        all_images = torch.cat(all_images)
-
         save_incorrect_images(all_predictions, all_targets, all_images, class_labels_dict)
 
     # Calculate metrics
-    num_classes = len(torch.unique(all_targets))
-    metrics_df = calculate_metrics(all_predictions, all_targets, num_classes)
+    metrics_df = calculate_metrics(all_predictions, all_targets, num_classes, class_labels)
 
     # Log metrics to W&B
     wandb.log({"classification metrics": wandb.Table(dataframe=metrics_df)})
