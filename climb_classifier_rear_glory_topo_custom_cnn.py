@@ -3,6 +3,7 @@
 import torch
 from torch import nn
 from torch.utils.data import DataLoader, random_split, WeightedRandomSampler, Dataset
+from torch.optim.lr_scheduler import OneCycleLR, CosineAnnealingWarmRestarts
 from torchvision import datasets
 import torchvision.transforms as transforms
 from torch_lr_finder import LRFinder
@@ -20,36 +21,24 @@ import os
 from datetime import datetime
 from tqdm.notebook import tqdm
 from PIL import Image
+import random
+
+# %%
+# Seed freeze
+seed=1220
+torch.manual_seed(seed)
+np.random.seed(seed)
+random.seed(seed)
 
 # %%
 # Run utility bools
+project_name = "climb_classifier_rear_glory_topo_custom_cnn"
 wandb_enabled = True
 wandb_grad_tracking = False
 save_best_model = False
 save_incorrect_images_local = False
 
-
-# %%
-# Seed freeze
-torch.manual_seed(1220)
-
-# %%
-# Parameters
-param_config={'test_split': 0.1, # proportion of data is assigned to validation
-              'val_split': 0.1, # proportion of data assigned to testing
-              'class_imbalance_split_handling': True, # Enables balanced splitting of train/val/test datasets
-              'class_imbalance_sample_handling': False, # Enables a weighted random sampler when loading data into batches
-              'class_imbalance_loss_handling': True, # Enables weighted application of losses based on class.
-              'img_size': (224, 224), # WxH of image to transform to
-              'complex_rand_image_transform_enabled': True, # Whether to apply more complex random image transformations such as rand_flips
-              'batch_size':32,
-              'starting_lr': 1e-4, # Should be 1e-7 if using lr_finder
-              'lr_finder_bool': False, # Whether to use the lr_finder tool
-              'weight_decay': 0,
-              'epochs': 10
-        }
-
-# wandb init
+# wandb login
 if wandb_enabled:
     wandb_enabled_str = 'online'
 else:
@@ -57,10 +46,31 @@ else:
     
 os.environ["WANDB_API_KEY"] = dotenv_values(".env")['WANDB_API_KEY']
 wandb.login()
-wandb.init(project="climb_classifier_rear_glory_topo_custom_cnn",
-            mode=wandb_enabled_str,
-            config=param_config
-            )
+
+# %%
+# Single run config
+param_config={'test_split': 0.1, # proportion of data is assigned to validation
+            'val_split': 0.1, # proportion of data assigned to testing
+            'class_imbalance_split_handling': True, # Enables balanced splitting of train/val/test datasets
+            'class_imbalance_sample_handling': True, # Enables a weighted random sampler when loading data into batches
+            'class_imbalance_loss_handling': True, # Enables weighted application of losses based on class.
+            'img_size': (224, 224), # WxH of image to transform to
+            'complex_rand_image_transform_enabled': True, # Whether to apply more complex random image transformations such as rand_flips
+            'batch_size': 32,
+            'lr_basic_or_finder': 'basic', # 'basic' or 'finder'. Either use a user defined value or use a LRRT function to find the optimal value
+            'basic_lr': 1e-1, # Only used if lr_basic_or_finder is basic
+            'lr_schedule': 'none', # none, onecycle
+            'weight_decay': 0,
+            'epochs': 10
+        }
+
+# %%
+# wandb init
+wandb.init(project=project_name,
+        mode=wandb_enabled_str,
+        config=param_config
+        )
+
 
 # Store into vars for readability
 test_split = wandb.config['test_split']
@@ -71,8 +81,9 @@ class_imbalance_loss_handling = wandb.config['class_imbalance_loss_handling']
 img_size = wandb.config['img_size']
 complex_rand_image_transform_enabled = wandb.config['complex_rand_image_transform_enabled']
 batch_size = wandb.config['batch_size']
-starting_lr = wandb.config['starting_lr']
-lr_finder_bool = wandb.config['lr_finder_bool']
+lr_basic_or_finder = wandb.config['lr_basic_or_finder']
+basic_lr = wandb.config['basic_lr']
+lr_schedule = wandb.config['lr_schedule']
 weight_decay = wandb.config['weight_decay']
 epochs = wandb.config['epochs']
 
@@ -152,9 +163,6 @@ if class_imbalance_split_handling:
         stratify=temp_labels
     )
 
-    # Create a WeightedRandomSampler
-    sampler = WeightedRandomSampler(weights=class_weights, num_samples=len(train_data), replacement=True) # this makes it more likely for an under-represented class to be sampled in a batch, the batch itself is not guaranteed to be balanced.
-
     # There is no generic empty dataset class so we make our own.
     class CustomImageDataset(Dataset):
         def __init__(self, data, labels, transform=None):
@@ -181,6 +189,10 @@ if class_imbalance_split_handling:
     
     # Dataloader setup
     if class_imbalance_sample_handling:
+        # Create a WeightedRandomSampler
+        sampler_labels = [label for _, label in train_data]
+        sampler_weights = torch.tensor([class_weights[label] for label in sampler_labels], dtype=torch.float).to(device)
+        sampler = WeightedRandomSampler(weights=sampler_weights, num_samples=len(train_data), replacement=True) # this makes it more likely for an under-represented class to be sampled in a batch, the batch itself is not guaranteed to be balanced.
         train_dataloader = DataLoader(train_dataset, batch_size=batch_size, sampler=sampler)
     else:
         train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
@@ -193,11 +205,13 @@ else:
     # Data splitting
     train_data, val_data, test_data = random_split(full_dataset, [1-(val_split+test_split), val_split, test_split])
 
-    # Create a WeightedRandomSampler
-    sampler = WeightedRandomSampler(weights=class_weights, num_samples=len(train_data), replacement=True)
 
     # Data loader setup
     if class_imbalance_sample_handling:
+        # Create a WeightedRandomSampler
+        sampler_labels = [label for _, label in train_data]
+        sampler_weights = torch.tensor([class_weights[label] for label in sampler_labels], dtype=torch.float).to(device)
+        sampler = WeightedRandomSampler(weights=sampler_weights, num_samples=len(train_data), replacement=True) # this makes it more likely for an under-represented class to be sampled in a batch, the batch itself is not guaranteed to be balanced.
         train_dataloader = DataLoader(train_data, batch_size=batch_size, sampler=sampler)
     else:
         train_dataloader = DataLoader(train_data, batch_size=batch_size, shuffle=True)
@@ -231,7 +245,7 @@ class CNN(nn.Module):
             nn.Conv2d(in_channels=32, out_channels=64, kernel_size=3),
             nn.BatchNorm2d(64),
             nn.ReLU(),
-            nn.MaxPool2d(2),
+            nn.MaxPool2d(kernel_size=2, stride=2),
             
             nn.Flatten())
         
@@ -250,43 +264,86 @@ class CNN(nn.Module):
         return out
 
 model = CNN().to(device)
-print(model)
+# print(model)
 
 # %%
-# Loss function and optimizer definition
+# Loss function definition
 if class_imbalance_loss_handling:
-    loss_fn = nn.CrossEntropyLoss(weight=class_weights) # can weight loss function to bias
+    loss_fn = nn.CrossEntropyLoss(weight=class_weights) # Loss scaled to class imbalance
 else:
     loss_fn = nn.CrossEntropyLoss()
 
-optimizer = torch.optim.Adam(model.parameters(), lr=starting_lr, weight_decay=weight_decay)
+# %%
+# optimizer definition and lr type
 
-# [Optional]
-# LR Finder
-if lr_finder_bool:
+# Define finder function
+# If no schedule, the LR that yields the most negative slope on the chart is to be used.
+# If yes to a schedule, the min_lr will be the most negative slope, and the max_lr will be 10x smaller than the minimum value.
+def lrfinder(model, weight_decay, loss_fn, device, train_dataloader):
+    lower_lrf_bound = 1e-10
+    upper_lrf_bound = 1
+    lrf_numiter = 100
+
+    optimizer = torch.optim.Adam(model.parameters(), lr=lower_lrf_bound, weight_decay=weight_decay) # Initialize basic optimizer
     lr_finder = LRFinder(model, optimizer, loss_fn, device=device)
-    lr_finder.range_test(train_dataloader, end_lr=1, num_iter=100, step_mode='exp')
+    lr_finder.range_test(train_dataloader, end_lr=upper_lrf_bound, num_iter=lrf_numiter, step_mode='exp')
     lr_finder.plot() # to inspect the loss-learning rate graph
-    def suggested_lr(lr_finder, starting_lr):
+
+    def suggested_lr(lr_finder, lower_lrf_bound):
         lrs = np.array(lr_finder.history["lr"])
         losses = np.array(lr_finder.history["loss"])
+
+        min_loss_lr = lr_finder.history["lr"][np.argmin(lr_finder.history["loss"])]
+        min_loss_lr = 0.1*min_loss_lr # It is typical to take 10x less
 
         min_grad_idx = None
         try:
             min_grad_idx = (np.gradient(np.array(losses))).argmin()
-            output_lr = lrs[min_grad_idx]
+            min_grad_lr = lrs[min_grad_idx]
+            print(f'optimized or min_lr: {min_grad_lr}')
         except ValueError:
-            print("Failed to compute the gradients, there might not be enough points.")
-            output_lr = starting_lr
+            print("Failed to compute the gradients, there might not be enough points. Output is lower_lrf_bound")
+            min_grad_lr = lower_lrf_bound
+        print(f'max_lr: {min_loss_lr}')
             
-        return output_lr
-    optimized_lr = suggested_lr(lr_finder, starting_lr)
-
-
+        return min_loss_lr, min_grad_lr
+    
+    max_scheduled_lr, optimized_lr = suggested_lr(lr_finder, lower_lrf_bound) # optimized lr is either the single value past to a no-schedule setup, or the minimum value given to a schedule
     lr_finder.reset() # to reset the model and optimizer to their initial state
+    
+    return max_scheduled_lr, optimized_lr
 
+# Basic assigned lr, no scheduler
+if lr_basic_or_finder == 'basic' and lr_schedule == 'none':
+    scheduler_exists = False
+    optimizer = torch.optim.Adam(model.parameters(), lr=basic_lr, weight_decay=weight_decay)
+
+# LR Finder, no scheduler
+if lr_basic_or_finder == 'finder' and lr_schedule == 'none':
+    scheduler_exists = False
+    
+    max_scheduled_lr, optimized_lr = lrfinder(model, weight_decay, loss_fn, device, train_dataloader)
+   
     # Redefine optimizer with found LR
     optimizer = torch.optim.Adam(model.parameters(), lr=optimized_lr, weight_decay=weight_decay)
+
+# Onecycle, using finder to determine the min_lr, or a defined value given by basic_lr. either way uses lrfinder to determine the max_lr.
+if lr_schedule == 'onecycle':
+    scheduler_exists = True
+    
+    
+    if lr_basic_or_finder == 'basic':
+        onecycle_min_lr = basic_lr
+        onecycle_max_lr = 100*onecycle_min_lr
+    if lr_basic_or_finder == 'finder':
+        onecycle_max_lr, onecycle_min_lr = lrfinder(model, weight_decay, loss_fn, device, train_dataloader)
+    
+    # Define the number of iterations (epochs * len(train_dataloader))
+    total_iterations = epochs * len(train_dataloader)
+    
+    optimizer = torch.optim.Adam(model.parameters(), lr=onecycle_min_lr, weight_decay=weight_decay)
+    scheduler = OneCycleLR(optimizer, max_lr=onecycle_max_lr, total_steps=total_iterations, anneal_strategy='cos', cycle_momentum=True)
+
 
 # %%
 # Training loop definition
@@ -361,7 +418,8 @@ for epoch in tqdm(range(epochs), desc="Epochs", unit="epoch"):
     print(f"Epoch {epoch+1}/{epochs}\n-------------------------------")
     train(train_dataloader, model, loss_fn, optimizer, epoch)
     val(val_dataloader, model, loss_fn, epoch)
-    # scheduler.step()
+    if scheduler_exists:
+        scheduler.step()
     
 print("Done!")
 # %%
