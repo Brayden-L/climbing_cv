@@ -1,0 +1,53 @@
+program: climb_classifier_rear_glory_topo_custom_cnn.py
+
+name: weight_decay_sweep
+
+method: random
+
+metric:
+  goal: maximize
+  name: test_acc
+
+parameters:
+  test_split:
+    values: [0.1]
+
+  val_split:
+    values: [0.1]
+
+  class_imbalance_split_handling:
+    values: [True]
+
+  class_imbalance_sample_handling:
+    values: [True]
+
+  class_imbalance_loss_handling:
+    values: [False]
+
+  img_size:
+    values: [[224, 224]]
+
+  complex_rand_image_transform_enabled:
+    values: [True]
+
+  batch_size:
+    values: [32]
+
+  lr_basic_or_finder:
+    values: ['basic']
+
+  basic_lr:
+    distribution: log_uniform_values
+    min: 1e-6
+    max: 1e-4
+
+  lr_schedule:
+    values: ['none']
+
+  weight_decay:
+    distribution: log_uniform_values
+    min: 1e-5
+    max: 0.1
+
+  epochs:
+    values: [10]

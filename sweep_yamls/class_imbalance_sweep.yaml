@@ -1,0 +1,49 @@
+program: climb_classifier_rear_glory_topo_custom_cnn.py
+
+name: class_imbalance_sweep
+
+method: grid
+
+metric:
+  goal: maximize
+  name: test_acc
+
+parameters:
+  test_split:
+    values: [0.1]
+
+  val_split:
+    values: [0.1]
+
+  class_imbalance_split_handling:
+    values: [False, True]
+
+  class_imbalance_sample_handling:
+    values: [False, True]
+
+  class_imbalance_loss_handling:
+    values: [False, True]
+
+  img_size:
+    values: [[224, 224]]
+
+  complex_rand_image_transform_enabled:
+    values: [True]
+
+  batch_size:
+    values: [32]
+
+  lr_basic_or_finder:
+    values: ['basic']
+
+  basic_lr:
+    values: [1e-6]
+
+  lr_schedule:
+    values: ['none']
+
+  weight_decay:
+    values: [0]
+
+  epochs:
+    values: [10]

@@ -22,6 +22,7 @@ from datetime import datetime
 from tqdm.notebook import tqdm
 from PIL import Image
 import random
+import math
 
 ##
 # Seed freeze
@@ -221,16 +222,15 @@ def main(input_config=default_config): # the sweep agent will override the defau
             test_dataloader = DataLoader(test_data, batch_size=batch_size)
 
         # Data size confirmation
-        if custom_verbosity:
-            for X, y in val_dataloader:
+        
+        for X, y in val_dataloader:
+            num_img_channels = X.shape[1]
+            final_img_height = X.shape[2]
+            final_img_width = X.shape[3]
+            if custom_verbosity:
                 print(f"Shape of X [N, C, H, W]: {X.shape}")
                 print(f"Shape of y: {y.shape} {y.dtype}")
-                break
-
-        num_img_channels = X.shape[1]
-        final_img_height = X.shape[2]
-        final_img_width = X.shape[3]
-
+            break
 
         ##
         # Model definition
@@ -291,7 +291,7 @@ def main(input_config=default_config): # the sweep agent will override the defau
             optimizer = torch.optim.Adam(model.parameters(), lr=lower_lrf_bound, weight_decay=weight_decay) # Initialize basic optimizer
             lr_finder = LRFinder(model, optimizer, loss_fn, device=device)
             lr_finder.range_test(train_dataloader, end_lr=upper_lrf_bound, num_iter=lrf_numiter, step_mode='exp')
-            lr_finder.plot() # to inspect the loss-learning rate graph
+            # lr_finder.plot() # to inspect the loss-learning rate graph
 
             def suggested_lr(lr_finder, lower_lrf_bound):
                 lrs = np.array(lr_finder.history["lr"])
@@ -326,7 +326,7 @@ def main(input_config=default_config): # the sweep agent will override the defau
         if lr_basic_or_finder == 'finder' and lr_schedule == 'none':
             scheduler_exists = False
             
-            max_scheduled_lr, optimized_lr = lrfinder(model, weight_decay, loss_fn, device, train_dataloader)
+            _, optimized_lr = lrfinder(model, weight_decay, loss_fn, device, train_dataloader)
         
             # Redefine optimizer with found LR
             optimizer = torch.optim.Adam(model.parameters(), lr=optimized_lr, weight_decay=weight_decay)
@@ -348,6 +348,25 @@ def main(input_config=default_config): # the sweep agent will override the defau
             optimizer = torch.optim.Adam(model.parameters(), lr=onecycle_min_lr, weight_decay=weight_decay)
             scheduler = OneCycleLR(optimizer, max_lr=onecycle_max_lr, total_steps=total_iterations, anneal_strategy='cos', cycle_momentum=True)
 
+        ##
+        # Early stopping logic
+        loss_acc_es_patience = 5
+        loss_acc_es_epochs_wo_imp = 0
+        loss_acc_es_prev_val_acc = 0.0
+        
+        # If val accuracy remains the same, then the model has likely diverged and is guessing a single class.
+        def val_acc_early_stop(val_accuracy, prev_val_accuracy, patience, epochs_wo_imp):
+            decimal_places = 3
+            rounded_val_acc = round(val_accuracy, decimal_places)
+            rounded_prev_val_acc = round(prev_val_accuracy, decimal_places)
+            if rounded_val_acc == rounded_prev_val_acc:
+                epochs_wo_imp += 1
+            else:
+                epochs_wo_imp = 0
+            loss_acc_es_bool = epochs_wo_imp == patience # This line looks a lil silly but sets the bool to true if the other to vars are equal.
+            prev_val_accuracy = val_accuracy # Set current val_acc to previous for next check
+            return loss_acc_es_bool, prev_val_accuracy, epochs_wo_imp
+
 
         ##
         # Training loop definition
@@ -359,7 +378,7 @@ def main(input_config=default_config): # the sweep agent will override the defau
             for batch, (X, y) in enumerate(dataloader):
                 X, y = X.to(device), y.to(device)
 
-                # Compute prediction error
+                # Forward step
                 pred = model(X)
                 loss = loss_fn(pred, y)
 
@@ -399,18 +418,19 @@ def main(input_config=default_config): # the sweep agent will override the defau
                     correct += (pred.argmax(1) == y).type(torch.float).sum().item()
             val_loss /= num_batches
             correct /= size
+            val_acc = correct*100
             print(f"Val Error: \nAccuracy: {(100*correct):>0.1f}%, Avg loss: {val_loss:>4f} \n")
             
-            wandb.log({"Val Loss": val_loss, "Val Accuracy": 100 * correct}, step=epoch)
+            wandb.log({"Val Loss": val_loss, "Val Accuracy": val_acc}, step=epoch)
                 
             # Check if the current model is the best so far
-            if correct > best_accuracy:
-                best_accuracy = correct
+            if val_acc > best_accuracy:
+                best_accuracy = val_acc
                 best_model_weights = model.state_dict()
                 best_epoch = epoch+1
-                print(f'New Best Model: Epoch:{best_epoch} | Accuracy:{best_accuracy*100:>4f}\n')
+                print(f'New Best Model: Epoch:{best_epoch} | Accuracy:{val_acc:>4f}\n')
             
-            return best_accuracy, best_model_weights
+            return best_accuracy, best_model_weights, val_acc
 
         ##
         # Run Train/Val
@@ -420,10 +440,18 @@ def main(input_config=default_config): # the sweep agent will override the defau
         for epoch in tqdm(range(epochs), desc="Epochs", unit="epoch"):
             print(f"Epoch {epoch+1}/{epochs}\n-------------------------------")
             train(train_dataloader, model, loss_fn, optimizer, epoch)
-            best_accuracy, best_model_weights = val(val_dataloader, model, loss_fn, epoch, best_accuracy, best_model_weights) # best accuracy must be fed back into the function
+            best_accuracy, best_model_weights, val_acc = val(val_dataloader, model, loss_fn, epoch, best_accuracy, best_model_weights) # best accuracy must be fed back into the function
             if scheduler_exists:
                 scheduler.step()
+                
+            # Early Stopping Logic
+            loss_acc_es_bool, loss_acc_es_prev_val_acc, loss_acc_es_epochs_wo_imp = val_acc_early_stop(val_acc, loss_acc_es_prev_val_acc, loss_acc_es_patience, loss_acc_es_epochs_wo_imp)
+            if loss_acc_es_bool:
+                wandb.log({'loss_acc_es_bool': loss_acc_es_bool})
+                print('validation accurracy stalled, early stopping triggered')
+                break
         print("Training Complete")
+        
         ##
         # Save the best model
         if save_best_model:
