@@ -53,7 +53,7 @@ os.environ["WANDB_API_KEY"] = dotenv_values(".env")['WANDB_API_KEY']
 wandb.login()
 
 ##
-# Default configruation
+# Default configruation or for single runs
 default_config={'test_split': 0.1, # proportion of data is assigned to validation
             'val_split': 0.1, # proportion of data assigned to testing
             'pretrain_type': 'rt', # 'ffe (fixed feature extractor) or rt (retrain)
@@ -117,19 +117,19 @@ def main(input_config=default_config): # the sweep agent will override the defau
 
         ##
         # Image transformation
-        if complex_rand_image_transform_enabled:
+        if complex_rand_image_transform_enabled: # more complex
             img_transform = transforms.Compose([
                 transforms.Resize(img_size),
                 transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.2),
                 transforms.RandomHorizontalFlip(),
                 transforms.ToTensor(),
-                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]) # imagenet normalization
             ])
-        else:
+        else: # Basic
             img_transform = transforms.Compose([
                 transforms.Resize(img_size),
                 transforms.ToTensor(), 
-                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]), 
+                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]), # imagenet normalization
             ])
 
         ##
@@ -138,8 +138,8 @@ def main(input_config=default_config): # the sweep agent will override the defau
 
         ##
         # Class labels, weights etc.
-
-        # Class label details
+        
+        # Basic class labels and info
         class_labels = full_dataset.classes
         num_classes = len(class_labels)
         class_labels_dict = {i: class_labels[i] for i in range(num_classes)}
@@ -166,7 +166,7 @@ def main(input_config=default_config): # the sweep agent will override the defau
             print(f"Class Weights: {class_weights}")
 
         ##
-        # Split the data into train, validation, and test sets
+        # Data Splitting into train, validation, and test sets
         if class_imbalance_split_handling:
             # Ensure that train, val and test all have balanced classes using sklearn train_test_split function. A bit bulky as a result.
             # Data splitting
@@ -231,16 +231,17 @@ def main(input_config=default_config): # the sweep agent will override the defau
             if class_imbalance_sample_handling:
                 # Create a WeightedRandomSampler
                 sampler_labels = [label for _, label in train_data]
-                sampler_weights = torch.tensor([class_weights[label] for label in sampler_labels], dtype=torch.float).to(device)
+                sampler_weights = torch.tensor([class_weights[label] for label in sampler_labels], dtype=torch.float).to(device) # WeightedRandomSampler wants a weight tensor that is the length of the sampleset, with each entry being the samples class weight.
                 sampler = WeightedRandomSampler(weights=sampler_weights, num_samples=len(train_data), replacement=True) # this makes it more likely for an under-represented class to be sampled in a batch, the batch itself is not guaranteed to be balanced.
                 train_dataloader = DataLoader(train_data, batch_size=batch_size, sampler=sampler)
             else:
+                # Basic sampler
                 train_dataloader = DataLoader(train_data, batch_size=batch_size, shuffle=True)
+            # Assign the sampler to the dataloader
             val_dataloader = DataLoader(val_data, batch_size=batch_size)
             test_dataloader = DataLoader(test_data, batch_size=batch_size)
 
         # Data size confirmation
-        
         for X, y in val_dataloader:
             num_img_channels = X.shape[1]
             final_img_height = X.shape[2]
@@ -273,6 +274,8 @@ def main(input_config=default_config): # the sweep agent will override the defau
                     self.pretrain_net = models.squeezenet1_1(pretrained=True)
                 if pretrain_model_select == 'mobilenet_v3_large':
                     self.pretrain_net = models.mobilenet_v3_large(pretrained=True)
+                else:
+                    raise ValueError('pretrain_model_select var not valid')
                 
                 # Freeze the pretrained model parameters
                 for param in self.pretrain_net.parameters():
@@ -281,9 +284,9 @@ def main(input_config=default_config): # the sweep agent will override the defau
                     if pretrain_type == 'rt':
                         param.requires_grad = True
                     
-                pretrain_final_out_channels = self.pretrain_net(torch.empty(X.shape)).size(-1)
+                pretrain_final_out_channels = self.pretrain_net(torch.empty(X.shape)).size(-1) # calculates number of channels at end of pretrain model
 
-                # Add custom classifier on top
+                # Add custom fully connected layer on top
                 self.classifier = nn.Sequential(
                     nn.Linear(in_features=pretrain_final_out_channels, out_features=600),
                     nn.ReLU(),
@@ -295,8 +298,8 @@ def main(input_config=default_config): # the sweep agent will override the defau
                 )
 
             def forward(self, x):
-                features = self.pretrain_net(x)
-                out = self.classifier(features)
+                features = self.pretrain_net(x) # Run it through the pretrain
+                out = self.classifier(features) # Then the custom classifier
                 return out
 
         model = PretrainModel().to(device)
@@ -315,13 +318,14 @@ def main(input_config=default_config): # the sweep agent will override the defau
 
         # Define finder function
         # If no schedule, the LR that yields the most negative slope on the chart is to be used.
-        # If yes to a schedule, the min_lr will be the most negative slope, and the max_lr will be 10x smaller than the minimum value.
+        # If yes to a schedule, the min_lr will be the lr with the most negative slope, and the max_lr will be 10x smaller than the lr at the minimum loss value.
         def lrfinder(model, weight_decay, loss_fn, device, train_dataloader):
             lower_lrf_bound = 1e-10
             upper_lrf_bound = 1
             lrf_numiter = 100
 
             optimizer = torch.optim.Adam(model.parameters(), lr=lower_lrf_bound, weight_decay=weight_decay) # Initialize basic optimizer
+            
             lr_finder = LRFinder(model, optimizer, loss_fn, device=device)
             lr_finder.range_test(train_dataloader, end_lr=upper_lrf_bound, num_iter=lrf_numiter, step_mode='exp')
             if wandb.run.sweep_id is None: # We typically only want to visibly check the plot as part of a singular run, not a sweep. This plot will also pause the sweep script, which we do not want.
@@ -331,25 +335,25 @@ def main(input_config=default_config): # the sweep agent will override the defau
                 lrs = np.array(lr_finder.history["lr"])
                 losses = np.array(lr_finder.history["loss"])
 
-                min_loss_lr = lr_finder.history["lr"][np.argmin(lr_finder.history["loss"])]
-                min_loss_lr = 0.1*min_loss_lr # It is typical to take 10x less
+                max_lr_bound = lr_finder.history["lr"][np.argmin(lr_finder.history["loss"])]
+                max_lr_bound = 0.1*max_lr_bound # It is typical to take 10x less This is to effectively avoid the exploding loss portion of the plot.
 
                 min_grad_idx = None
                 try:
                     min_grad_idx = (np.gradient(np.array(losses))).argmin()
-                    min_grad_lr = lrs[min_grad_idx]
-                    print(f'optimized or min_lr: {min_grad_lr}')
+                    min_lr_bound = lrs[min_grad_idx]
+                    print(f'optimized or min_lr: {min_lr_bound}')
                 except ValueError:
                     print("Failed to compute the gradients, there might not be enough points. Output is lower_lrf_bound")
-                    min_grad_lr = lower_lrf_bound
-                print(f'max_lr: {min_loss_lr}')
+                    min_lr_bound = lower_lrf_bound
+                print(f'max_lr: {max_lr_bound}')
                     
-                return min_loss_lr, min_grad_lr
+                return max_lr_bound, min_lr_bound
             
-            max_scheduled_lr, optimized_lr = suggested_lr(lr_finder, lower_lrf_bound) # optimized lr is either the single value past to a no-schedule setup, or the minimum value given to a schedule
+            max_scheduled_lr, min_scheduled_lr = suggested_lr(lr_finder, lower_lrf_bound) # optimized lr is either the single value past to a no-schedule setup, or the minimum value given to a schedule
             lr_finder.reset() # to reset the model and optimizer to their initial state
             
-            return max_scheduled_lr, optimized_lr
+            return max_scheduled_lr, min_scheduled_lr
 
         # Basic assigned lr, no scheduler
         if lr_basic_or_finder == 'basic' and lr_schedule == 'none':
@@ -360,9 +364,9 @@ def main(input_config=default_config): # the sweep agent will override the defau
         if lr_basic_or_finder == 'finder' and lr_schedule == 'none':
             scheduler_exists = False
             
-            _, optimized_lr = lrfinder(model, weight_decay, loss_fn, device, train_dataloader)
+            _, min_scheduled_lr = lrfinder(model, weight_decay, loss_fn, device, train_dataloader)
             # Redefine optimizer with found LR
-            optimizer = torch.optim.Adam(model.parameters(), lr=optimized_lr, weight_decay=weight_decay)
+            optimizer = torch.optim.Adam(model.parameters(), lr=min_scheduled_lr, weight_decay=weight_decay)
 
         # Onecycle, using finder to determine the min_lr, or a defined value given by basic_lr. either way uses lrfinder to determine the max_lr.
         if lr_schedule == 'onecycle':
@@ -405,11 +409,13 @@ def main(input_config=default_config): # the sweep agent will override the defau
 
         ##
         # Early stopping logic
+        
+        # If val accuracy remains the same, then the model has likely diverged and is guessing a single class.
+        # This utility function will end the run if it detects n epochs greater than the patience at the same val accuracy.
         loss_acc_es_patience = 5
         loss_acc_es_epochs_wo_imp = 0
         loss_acc_es_prev_val_acc = 0.0
         
-        # If val accuracy remains the same, then the model has likely diverged and is guessing a single class.
         def val_acc_early_stop(val_accuracy, prev_val_accuracy, patience, epochs_wo_imp):
             decimal_places = 3
             rounded_val_acc = round(val_accuracy, decimal_places)
@@ -426,8 +432,9 @@ def main(input_config=default_config): # the sweep agent will override the defau
         ##
         # Training loop definition
         def train(dataloader, model, loss_fn, optimizer, epoch):
-            size = len(dataloader.dataset)
             model.train()
+            
+            size = len(dataloader.dataset)
             running_loss = 0.0
             
             for batch, (X, y) in enumerate(dataloader):
@@ -443,11 +450,12 @@ def main(input_config=default_config): # the sweep agent will override the defau
                 optimizer.zero_grad()
                 running_loss += loss.item()
                 
-                if batch % 3 == 0:
+                # Print some info every so often to provide some insight into how the training is going
+                if batch % 5 == 0:
                     # Basic batch info
                     loss, current = loss.item(), (batch + 1) * len(X)
                     
-                    # Class distribution for each batch
+                    # Class distribution for each batch, useful when troubleshooting class imbalance issues
                     batch_class_distribution = {label: 0 for label in class_labels}
                     for label in y.cpu().numpy():
                         class_name = class_labels[label]
@@ -476,11 +484,12 @@ def main(input_config=default_config): # the sweep agent will override the defau
         best_model_weights = None
         best_epoch = None
         def val(dataloader, model, loss_fn, epoch, best_accuracy, best_model_weights):
+            model.eval()
             
             size = len(dataloader.dataset)
             num_batches = len(dataloader)
-            model.eval()
             val_loss, correct = 0, 0
+            
             with torch.no_grad():
                 for X, y in dataloader:
                     X, y = X.to(device), y.to(device)
@@ -506,7 +515,7 @@ def main(input_config=default_config): # the sweep agent will override the defau
         ##
         # Run Train/Val
         if wandb_grad_tracking:
-            wandb.watch(model, loss_fn, log='gradients', log_freq=25)
+            wandb.watch(model, loss_fn, log='gradients', log_freq=25) # log_freq here is in terms of batches I'm pretty sure
             
         for epoch in tqdm(range(epochs), desc="Epochs", unit="epoch"):
             print(f"Epoch {epoch+1}/{epochs}\n-------------------------------")
@@ -524,12 +533,13 @@ def main(input_config=default_config): # the sweep agent will override the defau
         print("Training Complete")
         
         ##
-        # Save the best model
+        # Save the best model locally
         if save_best_model:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             filename = f"saved_models/{run_name}_{timestamp}.pth"
             torch.save(best_model_weights, filename)
             print(f'Epoch {best_epoch} saved as {filename}')
+            
         ##
         # Test Data
         # Utility funcs for test data output
@@ -645,6 +655,4 @@ def main(input_config=default_config): # the sweep agent will override the defau
         
 if __name__ == '__main__':
     main()
-# %%
-
 # %%
