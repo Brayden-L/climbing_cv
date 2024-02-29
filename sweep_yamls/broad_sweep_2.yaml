@@ -1,6 +1,6 @@
 program: climb_classifier_rear_glory_topo_custom_cnn.py
 
-name: weight_decay_sweep
+name: broad_sweep_2
 
 method: random
 
@@ -19,16 +19,16 @@ parameters:
     values: [True]
 
   class_imbalance_sample_handling:
-    values: [True]
+    values: [False, True]
 
   class_imbalance_loss_handling:
-    values: [False]
+    values: [False, True]
 
   img_size:
     values: [[224, 224]]
 
   complex_rand_image_transform_enabled:
-    values: [True]
+    values: [False, True]
 
   batch_size:
     values: [32]
@@ -38,16 +38,14 @@ parameters:
 
   basic_lr:
     distribution: log_uniform_values
-    min: 1e-6
-    max: 1e-4
+    min: 1e-9
+    max: 1e-6
 
   lr_schedule:
-    values: ['none']
+    values: ['none', 'onecycle']
 
   weight_decay:
-    distribution: log_uniform_values
-    min: 1e-5
-    max: 0.1
+    values: [0]
 
   epochs:
-    values: [10]
+    values: [20]

@@ -8,7 +8,7 @@ from collections import defaultdict
 import random
 
 # %%
-folder_path = r"C:\Users\Brayden\Desktop\climbing_photo_rear_glory_topo_classifier\climbing_classifier_data\rear"
+folder_path = r"C:\Users\Brayden\Desktop\climbing_photo_rear_glory_topo_classifier\climbing_classifier_data\topo"
 random.seed(1220)
 # %%
 def find_duplicate_images(folder_path):

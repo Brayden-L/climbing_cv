@@ -3,8 +3,8 @@
 import torch
 from torch import nn
 from torch.utils.data import DataLoader, random_split, WeightedRandomSampler, Dataset
-from torch.optim.lr_scheduler import OneCycleLR, CosineAnnealingWarmRestarts
-from torchvision import datasets
+from torch.optim.lr_scheduler import OneCycleLR, CosineAnnealingWarmRestarts, ExponentialLR
+from torchvision import datasets, models
 import torchvision.transforms as transforms
 from torch_lr_finder import LRFinder
 from torchvision.utils import save_image
@@ -33,12 +33,12 @@ random.seed(seed)
 
 ##
 # Run utility bools
-project_name = "climb_classifier_rear_glory_topo_custom_cnn_sweep" # Name of project to send wandb logs to.
+project_name = "climb_classifier_rear_glory_topo_transferlearn2_cnn" # Name of project to send wandb logs to.
 wandb_enabled = True # Whether to track this pytorch training with wandb.
 wandb_grad_tracking = False # Whether to track gradients, can be computationally expensive, but good to track down exploding/vanishing gradients
-save_best_model = False # Whether to save the best model locally.
-save_incorrect_images_local = False # Whether to save incorrectly labelled test images locally, useful to manually look for trends in difficult to classify images
-custom_verbosity = False # Whether to enable additional print messages that provide additional context to the training.
+save_best_model = True # Whether to save the best model locally.
+save_incorrect_images_local = True # Whether to save incorrectly labelled test images locally, useful to manually look for trends in difficult to classify images
+custom_verbosity = True # Whether to enable additional print messages that provide additional context to the training.
 
 data_path = './climbing_classifier_data'
 
@@ -53,21 +53,27 @@ os.environ["WANDB_API_KEY"] = dotenv_values(".env")['WANDB_API_KEY']
 wandb.login()
 
 ##
-# Sweep configruation
+# Default configruation
 default_config={'test_split': 0.1, # proportion of data is assigned to validation
             'val_split': 0.1, # proportion of data assigned to testing
+            'pretrain_type': 'rt', # 'ffe (fixed feature extractor) or rt (retrain)
+            'pretrain_model_select': 'vgg11', # any of available torchvision models
             'class_imbalance_split_handling': True, # Enables balanced splitting of train/val/test datasets
-            'class_imbalance_sample_handling': False, # Enables a weighted random sampler when loading data into batches
-            'class_imbalance_loss_handling': True, # Enables weighted application of losses based on class.
+            'class_imbalance_sample_handling': True, # Enables a weighted random sampler when loading data into batches
+            'class_imbalance_loss_handling': False, # Enables weighted application of losses based on class.
             'img_size': (224, 224), # WxH of image to transform to
-            'complex_rand_image_transform_enabled': True, # Whether to apply more complex random image transformations such as rand_flips
+            'complex_rand_image_transform_enabled': False, # Whether to apply more complex random image transformations such as rand_flips
             'batch_size': 32,
             'lr_basic_or_finder': 'finder', # 'basic' or 'finder'. Either use a user defined value or use a LRRT function to find the optimal value
-            'basic_lr': 1e-4, # Only used if lr_basic_or_finder is basic
-            'lr_schedule': 'none', # none, onecycle
-            'weight_decay': 0,
-            'dropout': 0,
-            'epochs': 5
+            'basic_lr': 1e-7, # Only used if lr_basic_or_finder is basic
+            'lr_schedule': 'none', # none, onecycle, exp_decay, cosan_wr
+            'onecycle_factor': 10, # What proportion of starting value to rise to. float >1
+            'exp_decay_factor': 1e-2, # What proportion of starting value to asymptote to float 0<x<1
+            'cosan_wr_period': 10, # T0 for cosine w/ warm restart
+            'cosan_wr_mult': 1, # T_mult for cosine w/ warm restart
+            'weight_decay': 0, # Weight decay for optimizer
+            'dropout': 0.5,
+            'epochs': 30
         }
 
 ##
@@ -79,6 +85,8 @@ def main(input_config=default_config): # the sweep agent will override the defau
         # Store into vars for readability
         test_split = config['test_split']
         val_split = config['val_split']
+        pretrain_type = config['pretrain_type']
+        pretrain_model_select = config['pretrain_model_select']
         class_imbalance_split_handling = config['class_imbalance_split_handling']
         class_imbalance_sample_handling = config['class_imbalance_sample_handling']
         class_imbalance_loss_handling = config['class_imbalance_loss_handling'] 
@@ -88,9 +96,15 @@ def main(input_config=default_config): # the sweep agent will override the defau
         lr_basic_or_finder = config['lr_basic_or_finder']
         basic_lr = config['basic_lr']
         lr_schedule = config['lr_schedule']
+        onecycle_factor = config['onecycle_factor']
+        exp_decay_factor = config['exp_decay_factor']
+        cosan_wr_period = config['cosan_wr_period']
+        cosan_wr_mult = config['cosan_wr_mult']
         weight_decay = config['weight_decay']
         dropout = config['dropout']
         epochs = config['epochs']
+        
+        run_name = wandb.run.name
 
         ##
         # Training device selection
@@ -108,12 +122,14 @@ def main(input_config=default_config): # the sweep agent will override the defau
                 transforms.Resize(img_size),
                 transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.2),
                 transforms.RandomHorizontalFlip(),
-                transforms.ToTensor()
+                transforms.ToTensor(),
+                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
             ])
         else:
             img_transform = transforms.Compose([
                 transforms.Resize(img_size),
-                transforms.ToTensor()
+                transforms.ToTensor(), 
+                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]), 
             ])
 
         ##
@@ -236,28 +252,40 @@ def main(input_config=default_config): # the sweep agent will override the defau
 
         ##
         # Model definition
-        class CNN(nn.Module):
-            
+        class PretrainModel(nn.Module):
             def __init__(self):
-                super(CNN, self).__init__()
+                super(PretrainModel, self).__init__()
+
+                # Load pre-trained pretrained model
+                if pretrain_model_select == 'alexnet':
+                    self.pretrain_net = models.alexnet(pretrained=True)
+                if pretrain_model_select == 'vgg11':
+                    self.pretrain_net = models.alexnet(pretrained=True)
+                if pretrain_model_select == 'vgg16':
+                    self.pretrain_net = models.vgg16(pretrained=True)
+                if pretrain_model_select == 'resnet18':
+                    self.pretrain_net = models.resnet18(pretrained=True)
+                if pretrain_model_select == 'resnet50':
+                    self.pretrain_net = models.resnet50(pretrained=True)
+                if pretrain_model_select == 'densenet121':
+                    self.pretrain_net = models.densenet121(pretrained=True)
+                if pretrain_model_select == 'squeezenet1_1':
+                    self.pretrain_net = models.squeezenet1_1(pretrained=True)
+                if pretrain_model_select == 'mobilenet_v3_large':
+                    self.pretrain_net = models.mobilenet_v3_large(pretrained=True)
                 
-                self.feature_extractor = nn.Sequential(
-                    nn.Conv2d(in_channels=num_img_channels, out_channels=32, kernel_size=3, padding=1),
-                    nn.BatchNorm2d(32),
-                    nn.ReLU(),
-                    nn.MaxPool2d(kernel_size=2, stride=2),
+                # Freeze the pretrained model parameters
+                for param in self.pretrain_net.parameters():
+                    if pretrain_type == 'ffe':
+                        param.requires_grad = False
+                    if pretrain_type == 'rt':
+                        param.requires_grad = True
                     
-                    nn.Conv2d(in_channels=32, out_channels=64, kernel_size=3),
-                    nn.BatchNorm2d(64),
-                    nn.ReLU(),
-                    nn.MaxPool2d(kernel_size=2, stride=2),
-                    
-                    nn.Flatten())
-                
-                n_channels = self.feature_extractor(torch.empty(X.shape)).size(-1)
-                
+                pretrain_final_out_channels = self.pretrain_net(torch.empty(X.shape)).size(-1)
+
+                # Add custom classifier on top
                 self.classifier = nn.Sequential(
-                    nn.Linear(in_features=n_channels, out_features=600),
+                    nn.Linear(in_features=pretrain_final_out_channels, out_features=600),
                     nn.ReLU(),
                     nn.Dropout(dropout),
                     nn.Linear(in_features=600, out_features=120),
@@ -265,13 +293,13 @@ def main(input_config=default_config): # the sweep agent will override the defau
                     nn.Dropout(dropout),
                     nn.Linear(in_features=120, out_features=num_classes) # Softmax is applied by the crossentropy loss function, so is not needed here.
                 )
-                
+
             def forward(self, x):
-                features = self.feature_extractor(x)
-                out = self.classifier(features)        
+                features = self.pretrain_net(x)
+                out = self.classifier(features)
                 return out
 
-        model = CNN().to(device)
+        model = PretrainModel().to(device)
         if custom_verbosity:
             print(model)
 
@@ -290,13 +318,14 @@ def main(input_config=default_config): # the sweep agent will override the defau
         # If yes to a schedule, the min_lr will be the most negative slope, and the max_lr will be 10x smaller than the minimum value.
         def lrfinder(model, weight_decay, loss_fn, device, train_dataloader):
             lower_lrf_bound = 1e-10
-            upper_lrf_bound = 0.1
+            upper_lrf_bound = 1
             lrf_numiter = 100
 
             optimizer = torch.optim.Adam(model.parameters(), lr=lower_lrf_bound, weight_decay=weight_decay) # Initialize basic optimizer
             lr_finder = LRFinder(model, optimizer, loss_fn, device=device)
             lr_finder.range_test(train_dataloader, end_lr=upper_lrf_bound, num_iter=lrf_numiter, step_mode='exp')
-            lr_finder.plot() # to inspect the loss-learning rate graph
+            if wandb.run.sweep_id is None: # We typically only want to visibly check the plot as part of a singular run, not a sweep. This plot will also pause the sweep script, which we do not want.
+                lr_finder.plot() # to inspect the loss-learning rate graph
 
             def suggested_lr(lr_finder, lower_lrf_bound):
                 lrs = np.array(lr_finder.history["lr"])
@@ -332,7 +361,6 @@ def main(input_config=default_config): # the sweep agent will override the defau
             scheduler_exists = False
             
             _, optimized_lr = lrfinder(model, weight_decay, loss_fn, device, train_dataloader)
-        
             # Redefine optimizer with found LR
             optimizer = torch.optim.Adam(model.parameters(), lr=optimized_lr, weight_decay=weight_decay)
 
@@ -340,10 +368,9 @@ def main(input_config=default_config): # the sweep agent will override the defau
         if lr_schedule == 'onecycle':
             scheduler_exists = True
             
-            
             if lr_basic_or_finder == 'basic':
                 onecycle_min_lr = basic_lr
-                onecycle_max_lr = 100*onecycle_min_lr
+                onecycle_max_lr = onecycle_factor*onecycle_min_lr
             if lr_basic_or_finder == 'finder':
                 onecycle_max_lr, onecycle_min_lr = lrfinder(model, weight_decay, loss_fn, device, train_dataloader)
             
@@ -353,9 +380,32 @@ def main(input_config=default_config): # the sweep agent will override the defau
             optimizer = torch.optim.Adam(model.parameters(), lr=onecycle_min_lr, weight_decay=weight_decay)
             scheduler = OneCycleLR(optimizer, max_lr=onecycle_max_lr, total_steps=total_iterations, anneal_strategy='cos', cycle_momentum=True)
 
+        if lr_schedule == 'exp_decay':
+            scheduler_exists = True
+            
+            gamma = (exp_decay_factor) ** (1/epochs)
+            if lr_basic_or_finder == 'basic':
+                exp_starting_lr = basic_lr
+            if lr_basic_or_finder =='finder':
+                _, exp_starting_lr = lrfinder(model, weight_decay, loss_fn, device, train_dataloader)
+                
+            optimizer = torch.optim.Adam(model.parameters(), lr=exp_starting_lr, weight_decay=weight_decay)
+            scheduler = ExponentialLR(optimizer, gamma=gamma)
+        
+        if lr_schedule == 'cosan_wr':
+            scheduler_exists = True
+            
+            if lr_basic_or_finder == 'basic':
+                cosan_starting_lr = basic_lr
+            if lr_basic_or_finder =='finder':
+                _, cosan_starting_lr = lrfinder(model, weight_decay, loss_fn, device, train_dataloader)
+            
+            optimizer = torch.optim.Adam(model.parameters(), lr=cosan_starting_lr, weight_decay=weight_decay)
+            scheduler = CosineAnnealingWarmRestarts(optimizer, T_0=cosan_wr_period, T_mult=cosan_wr_mult)
+
         ##
         # Early stopping logic
-        loss_acc_es_patience = 3
+        loss_acc_es_patience = 5
         loss_acc_es_epochs_wo_imp = 0
         loss_acc_es_prev_val_acc = 0.0
         
@@ -394,8 +444,24 @@ def main(input_config=default_config): # the sweep agent will override the defau
                 running_loss += loss.item()
                 
                 if batch % 3 == 0:
+                    # Basic batch info
                     loss, current = loss.item(), (batch + 1) * len(X)
-                    print(f"loss: {loss:>4f}  [{current:>5d}/{size:>5d}]")
+                    
+                    # Class distribution for each batch
+                    batch_class_distribution = {label: 0 for label in class_labels}
+                    for label in y.cpu().numpy():
+                        class_name = class_labels[label]
+                        batch_class_distribution[class_name] += 1
+                    percentage_distribution_class_batch = {class_name: count / len(y) * 100 for class_name, count in batch_class_distribution.items()}
+                    formatted_percentage_distribution_class_batch = {class_name: f"{percentage:.0f}" for class_name, percentage in percentage_distribution_class_batch.items()}
+
+
+                    if custom_verbosity:
+                        print(f"Sample Count: [{current:>5d}/{size:>5d}] | Loss: {loss:>4f} | Class Distro: {formatted_percentage_distribution_class_batch}")
+                    else:
+                        print(f"Sample Count: [{current:>5d}/{size:>5d}] | Loss: {loss:>4f}")
+ 
+
             
             # Calculate average loss for the epoch
             avg_loss = running_loss / len(dataloader)
@@ -461,8 +527,7 @@ def main(input_config=default_config): # the sweep agent will override the defau
         # Save the best model
         if save_best_model:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            model_name = type(model).__name__
-            filename = f"{model_name}_{timestamp}.pth"
+            filename = f"saved_models/{run_name}_{timestamp}.pth"
             torch.save(best_model_weights, filename)
             print(f'Epoch {best_epoch} saved as {filename}')
         ##
@@ -495,9 +560,10 @@ def main(input_config=default_config): # the sweep agent will override the defau
 
             # Get the current timestamp
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            inc_img_dir = f"{run_name}_{timestamp}"
             
             # Create the timestamped directory
-            save_dir = os.path.join(base_dir, timestamp)
+            save_dir = os.path.join(base_dir, inc_img_dir)
             os.makedirs(save_dir, exist_ok=True)
 
             incorrect_indices = torch.where(predictions.argmax(1) != targets)[0]
@@ -531,7 +597,7 @@ def main(input_config=default_config): # the sweep agent will override the defau
                 size = len(dataloader.dataset)
                 num_batches = len(dataloader)
                 
-                model = CNN().to(device)
+                model = PretrainModel().to(device)
                 model.load_state_dict(model_weights)
                 model.eval()
                 test_loss, correct = 0, 0
@@ -579,4 +645,6 @@ def main(input_config=default_config): # the sweep agent will override the defau
         
 if __name__ == '__main__':
     main()
+# %%
+
 # %%
